@@ -130,7 +130,7 @@ This table reflects the current release.
 Send this to your agent:
 
 ```
-Install Agent Reach: https://raw.githubusercontent.com/Panniantong/Agent-Reach/main/docs/install.md
+Install Agent Reach: https://raw.githubusercontent.com/shoknshok/Agent-Reach/main/docs/install.md
 ```
 
 Whether you're installing or upgrading, this one command is all you need.
