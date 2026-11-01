@@ -130,7 +130,7 @@ agent-reach read https://www.v2ex.com/t/123   # 按链接自动选渠道
 把这句话发给你的 Agent：
 
 ```
-帮我安装 Agent Reach：https://raw.githubusercontent.com/Panniantong/Agent-Reach/main/docs/install.md
+帮我安装 Agent Reach：https://raw.githubusercontent.com/shoknshok/Agent-Reach/main/docs/install.md
 ```
 
 无论是安装还是升级，都只需要这一条命令就行了。

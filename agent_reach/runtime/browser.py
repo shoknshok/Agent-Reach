@@ -48,8 +48,12 @@ _LOCK_WAIT = START_WAIT + 30.0
 #: How long Windows setup waits for the user to add the extension from the Web Store.
 _STORE_WAIT = 180.0
 
-OPENCLI_RELEASE_API = "https://api.github.com/repos/jackwener/OpenCLI/releases/latest"
-_EXTENSION_ASSET_RE = re.compile(r"^opencli-extension-.*\.zip$")
+#: The extension is pinned to the same OpenCLI release as the npm package (tools.TOOLS["opencli"].tested),
+#: and its archive must match this SHA-256. Bump all three together after reviewing the release.
+OPENCLI_EXTENSION_RELEASE = "v1.8.7"
+OPENCLI_EXTENSION_ASSET = "opencli-extension-v1.0.23.zip"
+OPENCLI_EXTENSION_SHA256 = "e3399db1e9dd626519a8719d638d3c3813494d1f030c1e96799e05ebe7ba5340"
+OPENCLI_EXTENSION_URL_TEMPLATE = "https://github.com/jackwener/OpenCLI/releases/download/{release}/{asset}"
 _USER_AGENT = "agent-reach"
 
 
@@ -238,13 +242,6 @@ def wait_for(check: Callable[[], bool], seconds: float, interval: float = 1.0) -
 # ── downloads ──
 
 
-def _fetch(url: str, timeout: float = 30.0) -> bytes:
-    """GET `url` (honours the OS / env proxy settings)."""
-    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
-
-
 def _download(url: str, dest: Path, timeout: float = 60.0) -> None:
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
     with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest, "wb") as out:
@@ -362,25 +359,21 @@ def extension_version() -> Optional[str]:
 
 
 def refresh_extension(*, upgrade: bool = False) -> dict:
-    """Install or update the OpenCLI extension from the latest OpenCLI release.
+    """Install or update the pinned OpenCLI extension.
 
-    Keeps the current copy when GitHub is unreachable; raises only if there is none.
+    The archive is downloaded from the pinned OpenCLI release and refused unless its SHA-256 matches
+    OPENCLI_EXTENSION_SHA256. Keeps the current copy when GitHub is unreachable; raises only if there is none.
     Returns {"version", "updated"}. A running browser is closed before files change.
     """
+    import hashlib
+
     from .result import UPSTREAM_BROKEN, ReachError
 
     current = extension_version()
     if current and not upgrade:
         return {"version": current, "updated": False}
-    try:
-        release = json.loads(_fetch(OPENCLI_RELEASE_API))
-        asset = next(a for a in release.get("assets", []) if _EXTENSION_ASSET_RE.match(a.get("name", "")))
-    except Exception as exc:  # noqa: BLE001
-        if current:
-            return {"version": current, "updated": False}
-        raise ReachError(UPSTREAM_BROKEN, f"could not find the OpenCLI extension release: {exc}") from None
     state = _load_state()
-    if current and state.get("extension_asset") == asset["name"]:
+    if current and state.get("extension_asset") == OPENCLI_EXTENSION_ASSET:
         return {"version": current, "updated": False}
     from . import state as ledger
     make_private_dir(browser_root())
@@ -388,7 +381,11 @@ def refresh_extension(*, upgrade: bool = False) -> dict:
     work = Path(tempfile.mkdtemp(prefix=".extension-", dir=browser_root()))
     try:
         archive = work / "extension.zip"
-        _download(asset["browser_download_url"], archive)
+        _download(OPENCLI_EXTENSION_URL_TEMPLATE.format(release=OPENCLI_EXTENSION_RELEASE,
+                                                         asset=OPENCLI_EXTENSION_ASSET), archive)
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        if digest != OPENCLI_EXTENSION_SHA256:
+            raise ReachError(UPSTREAM_BROKEN, f"OpenCLI extension checksum mismatch for {OPENCLI_EXTENSION_ASSET}; not installed")
         unpacked = work / "unpacked"
         unpacked.mkdir()
         _unzip(archive, unpacked)
@@ -397,7 +394,7 @@ def refresh_extension(*, upgrade: bool = False) -> dict:
             raise ValueError("no manifest.json in the extension zip")
         version = json.loads(manifest.read_text("utf-8")).get("version")
         if current and version == current:
-            update_state(extension_asset=asset["name"], extension_version=version)
+            update_state(extension_asset=OPENCLI_EXTENSION_ASSET, extension_version=version)
             return {"version": version, "updated": False}
         if is_running():
             stop()  # never swap files under a running extension; the next launch loads the new one
@@ -411,7 +408,7 @@ def refresh_extension(*, upgrade: bool = False) -> dict:
         raise ReachError(UPSTREAM_BROKEN, f"could not install the OpenCLI extension: {exc}") from None
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    update_state(extension_asset=asset["name"], extension_version=version)
+    update_state(extension_asset=OPENCLI_EXTENSION_ASSET, extension_version=version)
     return {"version": version, "updated": True}
 
 

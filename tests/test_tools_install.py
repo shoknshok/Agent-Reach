@@ -98,3 +98,56 @@ def test_opencli_uses_pristine_compatible_release_without_install_hooks(monkeypa
     assert "--ignore-scripts" in calls[0]
     assert calls[0][-1]=="@jackwener/opencli@1.8.7"
     assert not tools.allowed(tools.TOOLS["opencli"],"1.8.8")
+
+
+def _tar_gz(path, files):
+    import io
+    import tarfile
+
+    with tarfile.open(path, "w:gz") as tf:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mode = 0o755
+            tf.addfile(info, io.BytesIO(data))
+    return path
+
+
+def test_uv_install_uses_the_pinned_release_and_verifies_its_checksum(monkeypatch, tmp_path):
+    import hashlib
+
+    _no_proxy(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(tools, "tools_root", lambda: tmp_path / "tools")
+    name = "uv-x86_64-unknown-linux-gnu.tar.gz"
+    monkeypatch.setattr(tools, "_uv_archive_name", lambda: name)
+    archive = _tar_gz(tmp_path / name, {"uv-x86_64-unknown-linux-gnu/uv": b"uv", "uv-x86_64-unknown-linux-gnu/uvx": b"uvx",
+                                         "uv-x86_64-unknown-linux-gnu/../../evil": b"x"})
+    monkeypatch.setitem(tools._UV_SHA256, name, hashlib.sha256(archive.read_bytes()).hexdigest())
+    urls = []
+    monkeypatch.setattr(tools, "_download", lambda url, dest, timeout=600: urls.append(url) or dest.write_bytes(archive.read_bytes()))
+    monkeypatch.setattr(tools, "_WIN", False)
+
+    tools._install_uv(tools.TOOLS["uv"])
+
+    assert urls == [f"https://github.com/astral-sh/uv/releases/download/{tools.UV_VERSION}/{name}"]
+    assert (tmp_path / "tools" / "uv" / "bin" / "uvx").read_bytes() == b"uvx"
+    assert not (tmp_path / "evil").exists()
+
+
+def test_uv_install_rejects_a_tampered_archive(monkeypatch, tmp_path):
+    _no_proxy(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(tools, "tools_root", lambda: tmp_path / "tools")
+    name = "uv-x86_64-unknown-linux-gnu.tar.gz"
+    monkeypatch.setattr(tools, "_uv_archive_name", lambda: name)
+    monkeypatch.setattr(tools, "_download", lambda url, dest, timeout=600: dest.write_bytes(b"not the real uv"))
+
+    with pytest.raises(ReachError, match="checksum mismatch"):
+        tools._install_uv(tools.TOOLS["uv"])
+    assert not (tmp_path / "tools" / "uv" / "bin").exists()
+
+
+def test_uv_never_runs_a_downloaded_install_script():
+    source = Path(tools.__file__).read_text()
+    assert "install.sh" not in source and "install.ps1" not in source

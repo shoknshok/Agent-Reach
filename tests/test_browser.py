@@ -27,9 +27,16 @@ def _zip(path, files):
     return path
 
 
-def _fake_downloads(monkeypatch, index: dict, archives: dict):
-    monkeypatch.setattr(browser, "_fetch", lambda url, timeout=30.0: json.dumps(index[url]).encode())
+def _fake_downloads(monkeypatch, archives: dict):
     monkeypatch.setattr(browser, "_download", lambda url, dest, timeout=60.0: shutil.copy(archives[url], dest))
+
+
+def _pin(monkeypatch, archive, asset):
+    import hashlib
+
+    monkeypatch.setattr(browser, "OPENCLI_EXTENSION_ASSET", asset)
+    monkeypatch.setattr(browser, "OPENCLI_EXTENSION_SHA256", hashlib.sha256(archive.read_bytes()).hexdigest())
+    return browser.OPENCLI_EXTENSION_URL_TEMPLATE.format(release=browser.OPENCLI_EXTENSION_RELEASE, asset=asset)
 
 
 def test_domain_match_is_exact_or_subdomain():
@@ -38,33 +45,58 @@ def test_domain_match_is_exact_or_subdomain():
     assert not cdp.domain_matches("notreddit.com", "reddit.com")
 
 
-def test_extension_installs_at_a_stable_path_and_refreshes_only_on_new_release(home, monkeypatch, tmp_path):
+def test_extension_installs_the_pinned_archive_and_does_not_refresh_on_its_own(home, monkeypatch, tmp_path):
     manifest = lambda v: (json.dumps({"manifest_version": 3, "version": v}), 0o644)  # noqa: E731
     v1 = _zip(tmp_path / "v1.zip", {"manifest.json": manifest("1.0.1"), "dist/background.js": ("//", 0o644)})
     v2 = _zip(tmp_path / "v2.zip", {"manifest.json": manifest("1.0.2")})
-    release = {"assets": [{"name": "opencli-extension-v1.0.1.zip", "browser_download_url": "u1"}]}
-    _fake_downloads(monkeypatch, {browser.OPENCLI_RELEASE_API: release}, {"u1": v1, "u2": v2})
+    url1 = _pin(monkeypatch, v1, "opencli-extension-v1.0.1.zip")
+    _fake_downloads(monkeypatch, {url1: v1})
 
     assert browser.refresh_extension() == {"version": "1.0.1", "updated": True}
     assert (browser.extension_dir() / "dist" / "background.js").is_file()
     assert browser.refresh_extension() == {"version": "1.0.1", "updated": False}
+    assert browser.refresh_extension(upgrade=True) == {"version": "1.0.1", "updated": False}
 
-    release["assets"] = [{"name": "opencli-extension-v1.0.2.zip", "browser_download_url": "u2"}]
+    # A new pin (code change) installs only on an explicit upgrade.
+    url2 = _pin(monkeypatch, v2, "opencli-extension-v1.0.2.zip")
+    _fake_downloads(monkeypatch, {url2: v2})
     assert browser.refresh_extension() == {"version": "1.0.1", "updated": False}
     assert browser.refresh_extension(upgrade=True) == {"version": "1.0.2", "updated": True}
     assert browser.extension_version() == "1.0.2"
     assert browser._load_state()["extension_version"] == "1.0.2"
 
 
+def test_extension_with_a_wrong_checksum_is_never_installed(home, monkeypatch, tmp_path):
+    from agent_reach.runtime.result import ReachError
+
+    bad = _zip(tmp_path / "bad.zip", {"manifest.json": (json.dumps({"version": "9.9.9"}), 0o644)})
+    url = browser.OPENCLI_EXTENSION_URL_TEMPLATE.format(
+        release=browser.OPENCLI_EXTENSION_RELEASE, asset=browser.OPENCLI_EXTENSION_ASSET)
+    _fake_downloads(monkeypatch, {url: bad})
+    with pytest.raises(ReachError, match="checksum mismatch"):
+        browser.refresh_extension()
+    assert browser.extension_version() is None
+    assert not browser.extension_dir().exists()
+
+
+def test_extension_pin_matches_the_pinned_opencli_release():
+    from agent_reach.runtime import tools
+
+    assert browser.OPENCLI_EXTENSION_RELEASE == "v" + tools.TOOLS["opencli"].tested
+    assert len(browser.OPENCLI_EXTENSION_SHA256) == 64
+    assert browser.OPENCLI_EXTENSION_ASSET in browser.OPENCLI_EXTENSION_URL_TEMPLATE.format(
+        release=browser.OPENCLI_EXTENSION_RELEASE, asset=browser.OPENCLI_EXTENSION_ASSET)
+
+
 def test_extension_refresh_offline_keeps_the_current_copy(home, monkeypatch):
     browser.extension_dir().mkdir(parents=True)
     (browser.extension_dir() / "manifest.json").write_text(json.dumps({"version": "1.0.0"}))
 
-    def offline(url, timeout=30.0):
+    def offline(url, dest, timeout=60.0):
         raise OSError("offline")
 
-    monkeypatch.setattr(browser, "_fetch", offline)
-    assert browser.refresh_extension() == {"version": "1.0.0", "updated": False}
+    monkeypatch.setattr(browser, "_download", offline)
+    assert browser.refresh_extension(upgrade=True) == {"version": "1.0.0", "updated": False}
 
 
 def test_ensure_browser_prefers_cloak_and_reuses_its_install(home, monkeypatch, tmp_path):

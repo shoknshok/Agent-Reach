@@ -797,3 +797,19 @@ def test_retired_mcp_cleanup_preserves_changed_private_path(env, monkeypatch):
     monkeypatch.setattr(paths, "read_small_text_no_follow", changed)
     assert manage._retired_mcp_notice()
     assert path.read_text() == "unchanged"
+
+
+def test_update_source_is_this_fork_and_falls_back_to_tags_without_releases(monkeypatch):
+    import io
+    import urllib.error
+
+    assert update_notice.REPO == "shoknshok/Agent-Reach"
+    assert manage.upgrade_command("1.7.0")[-1] == "https://github.com/shoknshok/Agent-Reach/archive/refs/tags/v1.7.0.zip"
+
+    def get(url, timeout):
+        if url.endswith("/releases/latest"):
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b""))
+        return [{"name": "v1.6.0"}, {"name": "v1.10.0"}, {"name": "v1.9.1"}, {"name": "nightly"}]
+
+    monkeypatch.setattr(update_notice, "_get_json", get)
+    assert update_notice.fetch_latest() == {"latest": "1.10.0", "notes": ""}

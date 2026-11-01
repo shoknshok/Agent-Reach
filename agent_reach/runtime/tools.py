@@ -417,25 +417,88 @@ def _install_node(tool: Tool) -> None:
         shutil.move(str(out / stem), str(dest / "current"))
 
 
-def _install_uv(tool: Tool) -> None:
-    dest = tool_dir("uv") / "bin"
-    env = {"UV_INSTALL_DIR": str(dest), "UV_NO_MODIFY_PATH": "1", "INSTALLER_NO_MODIFY_PATH": "1"}
-    if _WIN:
-        _run(["powershell", "-ExecutionPolicy", "ByPass", "-c", "irm https://astral.sh/uv/install.ps1 | iex"], env=env)
-    else:
-        from agent_reach.utils.paths import private_temporary_directory
+#: uv is installed from this pinned release, never from the mutable astral.sh install script.
+#: SHA-256 values are for the release archives; bump version and hashes together after review.
+UV_VERSION = "0.13.6"
+_UV_SHA256 = {
+    "uv-aarch64-apple-darwin.tar.gz": "60fbd5c8a1ed681845eea28d9d622fcde03c51e91a43465b64a1e17db1ed3472",
+    "uv-x86_64-apple-darwin.tar.gz": "63ba17fdda55ad1a230d4b37fc6017ffa10c23688c83818bd3bfdf914c652a02",
+    "uv-aarch64-unknown-linux-gnu.tar.gz": "229e194255c7958d86d56e8790d969a6f74736592133f0dfd0076f754c642c1d",
+    "uv-x86_64-unknown-linux-gnu.tar.gz": "f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645",
+    "uv-aarch64-unknown-linux-musl.tar.gz": "819692e404d23e5aae6bc44c0e260f1f5492fd1910ab4693b2c650f926dbe800",
+    "uv-x86_64-unknown-linux-musl.tar.gz": "5d61f26b6c7213779eda90edc6971ea6b0b796bfb8d49a574c8ad69b59838548",
+    "uv-aarch64-pc-windows-msvc.zip": "c2426c0c8e28b53d8c440e47a18d96ad4db51e159866c0e81435b196d7f0081c",
+    "uv-x86_64-pc-windows-msvc.zip": "a2a8820d5eea32f08ef467ef3b7f66883a9b076d5737a2fc2fbb5f458d1bb50f",
+}
 
-        with private_temporary_directory(prefix="uv-") as tmp:
-            script = Path(tmp) / "install.sh"
-            _download("https://astral.sh/uv/install.sh", script)
-            _run(["sh", str(script)], env=env)
-    nested = dest / "bin"  # older installers add a bin/ below UV_INSTALL_DIR
-    if nested.is_dir():
-        for f in nested.iterdir():
-            shutil.move(str(f), str(dest / f.name))
-        nested.rmdir()
+
+def _uv_archive_name() -> str:
+    system, machine = platform.system(), platform.machine().lower()
+    arch = {"x86_64": "x86_64", "amd64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}.get(machine)
+    if arch and system == "Darwin":
+        name = f"uv-{arch}-apple-darwin.tar.gz"
+    elif arch and system == "Linux":
+        libc = "gnu" if platform.libc_ver()[0] == "glibc" else "musl"
+        name = f"uv-{arch}-unknown-linux-{libc}.tar.gz"
+    elif arch and system == "Windows":
+        name = f"uv-{arch}-pc-windows-msvc.zip"
+    else:
+        name = ""
+    if name not in _UV_SHA256:
+        raise ReachError(NEED_SETUP, f"no pinned uv build for {system} {machine}",
+                         hint="Install uv: https://docs.astral.sh/uv/getting-started/installation/")
+    return name
+
+
+def _extract_named(archive: Path, names: Iterable[str], dest: Path) -> None:
+    """Copy only the named regular files out of a zip/tar.gz; no other member is ever written."""
+    import tarfile
+    import zipfile
+
+    wanted = set(names)
+    dest.mkdir(parents=True, exist_ok=True)
+    found: Set[str] = set()
+    if archive.suffix == ".zip":
+        with zipfile.ZipFile(archive) as zf:
+            members = [(i.filename, lambda i=i: zf.open(i)) for i in zf.infolist() if not i.is_dir()]
+            for filename, opener in members:
+                base = Path(filename).name
+                if base in wanted and base not in found:
+                    with opener() as src, open(dest / base, "wb") as out:
+                        shutil.copyfileobj(src, out)
+                    found.add(base)
+    else:
+        with tarfile.open(archive) as tf:
+            for member in tf.getmembers():
+                base = Path(member.name).name
+                if member.isfile() and base in wanted and base not in found:
+                    handle = tf.extractfile(member)
+                    if handle is not None:
+                        with handle, open(dest / base, "wb") as out:
+                            shutil.copyfileobj(handle, out)
+                        found.add(base)
+    for base in found:
+        os.chmod(dest / base, 0o755)
+    missing = wanted - found
+    if missing:
+        raise ReachError(UPSTREAM_BROKEN, f"uv archive is missing {', '.join(sorted(missing))}")
+
+
+def _install_uv(tool: Tool) -> None:
+    import hashlib
+
+    from agent_reach.utils.paths import private_temporary_directory
+
+    name = _uv_archive_name()
+    url = f"https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/{name}"
+    with private_temporary_directory(prefix="uv-") as tmp:
+        archive = Path(tmp) / name
+        _download(url, archive)
+        if hashlib.sha256(archive.read_bytes()).hexdigest() != _UV_SHA256[name]:
+            raise ReachError(UPSTREAM_BROKEN, f"checksum mismatch for {name}; uv not installed")
+        _extract_named(archive, (_exe("uv"), _exe("uvx")), tool_dir("uv") / "bin")
     if not _private_bin(tool, "uvx").exists():
-        raise ReachError(UPSTREAM_BROKEN, "the uv installer finished but uvx is missing")
+        raise ReachError(UPSTREAM_BROKEN, "the uv archive was installed but uvx is missing")
 
 
 def _install(tool: Tool, *, global_: bool = False) -> None:
